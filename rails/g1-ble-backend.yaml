@@ -1,0 +1,270 @@
+# Rails for g1-ble-backend — a smart-glasses relay agent.
+#
+# This is the worked example, and it is a real one rather than a toy: every
+# constraint below came from something that actually went wrong, or from a
+# hardware fact that is genuinely true and expensive to forget.
+#
+# Read LIMITS.md before trusting any of it.
+
+name: g1-ble-backend
+
+rails:
+  # -- reversibility ------------------------------------------------------
+  # The project runs on main and pushes continuously. Rewind is a git
+  # operation; a force-push or a hard reset is how you lose it. These are
+  # marked irreversible because a refusal to them is not a speed bump.
+
+  - name: no-force-push
+    kind: deny
+    irreversible: true
+    why: >
+      A force-push overwrites shared history. Every commit on this branch is
+      the only record of a measurement, and several commits exist solely to
+      keep a falsification visible. Losing one silently removes the evidence
+      that the feature was ever wrong.
+    patterns:
+      - "git push:*--force*"
+      - "git push:*-f *"
+      - "git push -f:*"
+      - "git push --force:*"
+      - "git push origin +*"
+
+  - name: no-destroy-local-history
+    kind: deny
+    irreversible: true
+    why: >
+      reset --hard and clean -fd discard work that exists nowhere else. The
+      measurement notes under documents/ are written once and never backed up.
+    patterns:
+      - "git reset --hard:*"
+      - "git clean -fdx:*"
+      - "git clean -fd:*"
+      - "git branch -D:*"
+      - "git checkout --orphan:*"
+
+  # -- the GitHub constraint --------------------------------------------
+  # This is the operator's stated constraint: never delete from any repo on
+  # GitHub. It is enforced here rather than trusted to the agent's memory,
+  # because memory is exactly the thing that fails under a long session.
+
+  - name: no-github-deletion
+    kind: deny
+    irreversible: true
+    why: >
+      Public repositories are not recoverable once deleted. Deny is set to
+      fail regardless of how narrow the target looks.
+    patterns:
+      - "gh repo delete:*"
+      - "gh repo rm:*"
+      - "gh gist delete:*"
+      - "gh secret delete:*"
+      - "gh variable delete:*"
+      - "gh api:*DELETE*"
+      - "gh api:*-X DELETE*"
+      - "gh api:*--method DELETE*"
+
+  # -- deletion generally -------------------------------------------------
+  # mavis-trash is allowed instead of rm. It is reversible, which rm is not,
+  # so this rail removes a whole class of prompts AND makes the operation
+  # safer. The substitution is the point.
+
+  - name: no-bare-rm
+    kind: deny
+    why: >
+      Use mavis-trash, which is recoverable. A project whose history is the
+      evidence should not delete things irreversibly by default.
+    patterns:
+      - "rm -rf:*"
+      - "rm -fr:*"
+      - "rm -f:/home*"
+      - "rm -f:/etc*"
+      - "rm -f:/var*"
+
+  - name: no-privilege-escalation
+    kind: deny
+    irreversible: true
+    why: >
+      Nothing in a BLE research project needs root. If a step appears to,
+      the step is wrong.
+    patterns:
+      - "sudo:*"
+      - "chmod -R 777:*"
+      - "chown -R:*"
+
+  # -- hardware honesty ---------------------------------------------------
+  # The single most expensive habit this project has is claiming to have
+  # measured something on hardware it has never touched. These rails make
+  # "scan the glasses" require a human.
+
+  - name: live-hardware-needs-human
+    kind: ask
+    why: >
+      Every BLE path in this repo is unproven on device: two peripherals, MTU
+      must be negotiated, the link drops after ~32s without a 0x25 heartbeat.
+      A scan will hang or silently connect to nothing, and a run that looks
+      like it worked is worse than one that clearly did not.
+    patterns:
+      - "bluetoothctl:*"
+      - "btmgmt:*"
+      - "btmon:*"
+      - "hciconfig:*"
+      - "hcitool:*"
+
+  - name: no-secret-commit
+    kind: ask
+    why: >
+      .env is gitignored. A command that greps for or prints key material is
+      fine to run, but one that stages it should be seen by a human first.
+    patterns:
+      - "git add:.env*"
+      - "git add:*credentials*"
+      - "git add:*secret*"
+
+  # -- the ordinary vocabulary -------------------------------------------
+  # Everything below is ASK-or-allow bookkeeping that the project has
+  # actually done many times. Pre-declaring it is the entire speed argument.
+
+  - name: inspect-files
+    kind: allow
+    patterns:
+      - "ls:*"
+      - "cat:*"
+      - "head:*"
+      - "tail:*"
+      - "wc:*"
+      - "file:*"
+      - "stat:*"
+      - "du:*"
+      - "tree:*"
+      - "nl:*"
+      - "od:*"
+      - "xxd:*"
+      - "echo:*"
+      - "pwd"
+      - "which:*"
+
+  - name: search-and-compare
+    kind: allow
+    patterns:
+      - "grep:*"
+      - "rg:*"
+      - "find:*"
+      - "fd:*"
+      - "diff:*"
+      - "sort:*"
+      - "uniq:*"
+      - "cut:*"
+      - "tr:*"
+      - "jq:*"
+      - "awk:*"
+      - "sed -n:*"
+
+  - name: python-test-suite
+    kind: allow
+    why: >
+      The entire verification story is eight offline suites run by
+      .venv/bin/python. Allowing the interpreter is the price of not asking
+      every thirty seconds, and it is an admitted cost -- see LIMITS.md.
+    patterns:
+      - ".venv/bin/python*"
+      - ".venv/bin/pip:*"
+      - "python3:*"
+
+  - name: git-inspection
+    kind: allow
+    patterns:
+      - "git status:*"
+      - "git log:*"
+      - "git diff:*"
+      - "git show:*"
+      - "git rev-parse:*"
+      - "git ls-files:*"
+      - "git remote -v"
+      - "git config --get:*"
+      - "git add:*"
+      - "git commit:*"
+      - "git fetch:*"
+
+  - name: git-push
+    kind: ask
+    why: >
+      Ordinary push is allowed but still surfaced: it changes shared state,
+      and the operator asked to be able to see branch movements. Set this to
+      allow if that is too noisy.
+    patterns:
+      - "git push:*"
+
+  - name: gh-read
+    kind: allow
+    patterns:
+      - "gh repo view:*"
+      - "gh issue list:*"
+      - "gh issue view:*"
+      - "gh pr list:*"
+      - "gh pr view:*"
+      - "gh auth status"
+
+# ---------------------------------------------------------------------------
+# CONTEXT — none of this is enforceable. It is what the goal-fit judge reads.
+#
+# Kept short because the judge is a small model answering in one shot. If the
+# digest grows past a few hundred words the judge starts skimming, and a
+# skimming judge is worse than no judge, because it produces confident
+# nonsense at speed.
+# ---------------------------------------------------------------------------
+
+context:
+  project: >
+    A bleak-based backend for Even Realities G1 smart glasses. The agent
+    watches a stream of events and decides whether to interrupt the wearer by
+    pushing text to their lenses.
+
+  product_posture: >
+    Silence is the default state. The most expensive thing this system can do
+    is interrupt for something worthless. A push the wearer did not need is a
+    worse outcome than a missed push.
+
+  hard_budget: >
+    At most 2 pushes per hour and 4 per day, enforced inside the policy
+    predicate, not downstream of it. A command that could send an unbounded
+    number of pushes to a physical device should be treated as a budget
+    violation regardless of what the code says.
+
+  hardware_truths: >
+    The G1 is TWO BLE peripherals, not one. MTU must be negotiated or no
+    notifications flow. The link drops after about 32 seconds without a 0x25
+    heartbeat. The display is 120 CHARACTERS (5 lines of 24), not 25 words.
+
+  unmeasured: >
+    There is NO G1 hardware on this host. Every scan, connect, notify and
+    render path is unproven on device. Any command or claim implying a
+    successful hardware interaction is suspect on its face, and the firmware
+    tilt threshold theta has never been measured by anyone.
+
+  standing_commitments:
+    - Never delete from any GitHub repository.
+    - main-branch changes must remain rewindable.
+    - Never quietly edit away a corrected claim; falsifications stay in the record.
+    - Every number in the README must be reproducible by a script in experiments/.
+    - Do not commit credentials. .env is gitignored.
+
+  aesthetics_of_the_work: >
+    This project's value is that it refuses to overstate. A change that makes
+    a number look better without making it true is the single most damaging
+    thing an agent could do here, and it is worse than shipping nothing.
+
+posture:
+  # The family rule, applied to this tool.
+  #
+  # A rail is a verdict about the world ("this is irreversible"), so it fails
+  # CLOSED: if the checker cannot evaluate, escalate.
+  #
+  # Goal-fit is a gate about traffic ("does this fit the project"), so it
+  # fails OPEN: if the model is down, the command still runs and merely loses
+  # its annotation. A model server hiccup must not halt all work.
+  rails: fail_closed
+  goal_fit: fail_open
+  on_denial: >
+    Say which rail refused and why, in one sentence. Do not retry the same
+    command in a different syntax; a refused command is a decision, not an
+    obstacle to route around.
