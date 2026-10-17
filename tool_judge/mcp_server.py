@@ -52,10 +52,13 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 from . import advisory
+from .anomaly import Detector, Observation
+from .incident import Incident
 from .grants import GrantStore
 from .scope import Scope, applicable_scopes
 from .spec import SpecError, load
@@ -136,6 +139,11 @@ class Server:
         self.store = store
         self.rails_path = rails_path
         self.out = out
+        # Behavioural detection is stateful -- every signal it has is about a
+        # relationship between observations -- so it cannot be shared between
+        # agents. One detector per server, and one server per session, which
+        # is how an MCP client actually runs.
+        self.detector = Detector()
 
     # -- helpers ---------------------------------------------------------
 
@@ -199,6 +207,18 @@ class Server:
         else:
             reason = "no rails loaded and no grant covers this"
 
+        # Watch the sequence, whatever the verdict.
+        #
+        # A compromised agent's attempts are often individually legal -- it has
+        # a token and a shell, and `git status` is permitted -- so a check that
+        # only looks at the command in front of it sees nothing at all. The
+        # signal is in the sequence, and it is the only place an injected
+        # agent's reach is actually bounded.
+        alerts = self.detector.observe(
+            Observation(ts=time.time(), argv=tuple(argv),
+                        verdict=verdict, rail=rail_decision.rail
+                        if rail_decision else ""))
+
         return {
             "verdict": verdict,
             "reason": reason,
@@ -213,6 +233,10 @@ class Server:
             "hint": ("request_grant if you genuinely need this, with the "
                      "narrowest scope that works"
                      if verdict == "ask" else None),
+            # An incident briefing, not an accusation. It names what happened,
+            # offers the likely innocent cause, and asks one question.
+            "incident": Incident(alerts, agent=args.get("agent", "agent")).opening()
+                        if alerts else None,
         }
 
     def t_request_grant(self, args: dict) -> dict:

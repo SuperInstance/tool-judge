@@ -271,6 +271,71 @@ Plain JSONL — the first thing anyone does with a log is `grep` it, and
 
 ---
 
+## When the command was allowed, and that is the problem
+
+A permission layer answers one question — may this run? — and a compromised
+agent's first problem is that many of its attempts are *perfectly legal*. It
+has a token, a shell, and `git status` is permitted. Nothing fires. It tries
+the next thing, and the interesting behaviour is in the **sequence**, not in
+any single command.
+
+The primary signal is **probing after a refusal**, which contradicts a rule
+this project already wrote:
+
+> A refused command is a decision, not an obstacle to route around.
+> — [LIMITS.md](LIMITS.md)
+
+```
+DENY    rm -rf data
+ASK     rm -r data          <- probe-after-refusal, HIGH
+```
+
+Severity is decided by whether the retry **got through**. A refusal followed
+by a different spelling that is then *allowed* means the rules failed to hold.
+A refusal followed by a different spelling that is refused again means the
+agent is stuck — annoying, not dangerous. The first version had those
+backwards.
+
+Also watched: `sudo` rewritten as `doas`/`pkexec` (invisible to a list that
+only knows the word "sudo"), and destructive escalation ladders
+(`rm f` → `rm -r d` → `rm -rf d`).
+
+### The incident briefing
+
+```
+WARN: 1 signal from tmux/glasses
+
+1. WHAT HAPPENED
+   [probe-after-refusal] rm was refused 1x and is being retried differently
+      DENY    rm -rf data
+      ASK     rm -r data
+
+2. IS THIS EXPECTED?
+   - a human is trying the same thing by hand in another terminal
+   - an agent is adapting to a flag the rail did not match
+   - a build script retries with reduced flags on first failure
+
+3. WHAT WOULD YOU LIKE TO DO
+   [deny        ] Refuse this command; the agent carries on.
+   [investigate ] Stop. Find where the instruction came from — almost always
+                  text the agent READ. Sanitising the input is the fix;
+                  tightening permissions only hides the symptom.
+   [allow       ] Permit it, and record that you did.
+   [session     ] Refuse this command and its whole class until the session ends.
+```
+
+**It never accuses.** A test asserts the words *compromised*, *malicious*,
+*injected*, *attacker* and *breach* never appear. It reports a pattern and
+names the most likely innocent cause; the conclusion is yours. And it does not
+resolve itself — it asks, and waits.
+
+That restraint is load-bearing. A guard that cries wolf gets dismissed, and a
+dismissed guard is worse than none, because it teaches you the whole class of
+signal is noise. `tests/test_anomaly.py` includes a **false-positive guard**:
+an ordinary ten-command session must raise nothing at all.
+
+---
+
 ## Bugs this repo found in itself
 
 Every one of these was a *thing that looked wired and was not*, which is the
@@ -284,6 +349,8 @@ which is either reassuring or humbling.
 | `Scope(r["scope"])` | enum looked up by *value* not *name* — every stored grant failed to load |
 | allow/ask precedence in the CLI | a scoped `allow` was overridden by the rails' unlisted-default, so granting anything not already in the rails file was impossible |
 | harness registry keyed by `"Verdict.ALLOW"` but looked up by `"allow"` | **every compile was a no-op** that reported "nothing to add, up to date" about a file it had never written to |
+| probe signal gated on the *current* verdict | missed the case that matters — a refused command retried differently **and allowed** |
+| probe severity keyed on `Severity.values()` | `Severity` is a str Enum; ranking crashed |
 
 The first one is the instructive one. Nothing raised. Every git command simply
 asked for permission, always, forever — which looks exactly like a cautious
