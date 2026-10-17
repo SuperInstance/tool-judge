@@ -23,6 +23,7 @@ import shlex
 import sys
 from pathlib import Path
 
+from .modes import CutOff, KillSwitch, Mode, Posture
 from .decisionlog import DecisionLog, REASONS
 from .compile import TARGETS, apply as compile_apply, diff as compile_diff
 from .grants import GrantStore
@@ -49,6 +50,12 @@ def _live(args) -> dict:
 
 
 def cmd_check(args) -> int:
+    # The kill switch gates THIS first, before any resolution. `check` is the
+    # path every agent uses to ask "may I run this", so a cut-off agent that
+    # still receives "allow" here is the one failure mode that makes the whole
+    # switch decorative.
+    KillSwitch(Path(args.store).with_suffix(".kill.json")).check()
+
     store = GrantStore(args.store)
     argv = args.command
     live = _live(args)
@@ -173,6 +180,41 @@ def cmd_decide(args) -> int:
     return 0
 
 
+def cmd_posture(args) -> int:
+    """Show or set how this project wants commands treated."""
+    from .grants import GrantStore as _S
+    store = _S(args.store)
+    key = "posture"
+    cur = store.get_meta(key)
+    if args.mode is None:
+        print(f"  {Posture.parse(cur or '').describe() if cur else 'ask-first (default)'}")
+        print("\n  modes: " + ", ".join(m.value for m in Mode))
+        print("  per-rail:  tool-judge posture --mode allow-silent=git-push:allow-alert")
+    else:
+        p = Posture.parse(args.mode)          # validates, raises on nonsense
+        store.set_meta(key, p.mode.value)
+        if p.overrides:
+            import json as _j
+            store.set_meta("posture_overrides", _j.dumps(
+                {k: v.value for k, v in p.overrides.items()}))
+        print(f"  posture -> {p.describe()}")
+    store.close()
+    return 0
+
+
+def cmd_cutoff(args) -> int:
+    """The switch that must never fail. Local, durable, instant, total."""
+    k = KillSwitch(Path(args.store).with_suffix(".kill.json"))
+    if args.reset:
+        k.reset(by=args.by)
+        print("  kill switch RESET — the agent may run again")
+        return 0
+    k.trip(args.reason or "manual", by=args.by)
+    print(f"  CUT OFF at {args.by}. Every command is refused until reset.")
+    print("  This is local and does not need the network that raised the alarm.")
+    return 0
+
+
 def cmd_log(args) -> int:
     log = DecisionLog(Path(args.store).with_suffix(".decisions.log"))
     print(log.summary() + "\n")
@@ -249,7 +291,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     l = sub.add_parser("list"); l.set_defaults(fn=cmd_list)
 
-    lg = sub.add_parser("log"); lg.set_defaults(fn=cmd_log)
+    lg = sub.add_parser("log"); lg.add_argument("-n", type=int, default=20)
+    lg.set_defaults(fn=cmd_log)
+
+    po = sub.add_parser("posture"); po.add_argument("--mode")
+    po.set_defaults(fn=cmd_posture)
+
+    co = sub.add_parser("cut-off"); co.add_argument("--reset", action="store_true")
+    co.add_argument("--reason", default=""); co.add_argument("--by", default="human")
+    co.set_defaults(fn=cmd_cutoff)
 
     pg = sub.add_parser("pending"); pg.set_defaults(fn=cmd_pending)
 
@@ -264,7 +314,6 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--label")
     d.set_defaults(fn=cmd_device)
 
-    lg.add_argument("-n", type=int, default=20)
     pr = sub.add_parser("profile"); pr.add_argument("profile_action",
                                                    choices=["list", "import"])
     pr.add_argument("name", nargs="?")
@@ -283,6 +332,9 @@ def main(argv=None) -> int:
         args.command = args.command[1:]
     try:
         return args.fn(args)
+    except CutOff as exc:
+        print(f"CUT OFF: {exc}", file=sys.stderr)
+        return 3
     except (ValueError, SpecError) as exc:
         print(f"{exc}", file=sys.stderr)
         return 2

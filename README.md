@@ -336,6 +336,65 @@ an ordinary ten-command session must raise nothing at all.
 
 ---
 
+## Postures, and the switch that must not fail
+
+Tell it in words how you want the agent to behave:
+
+```bash
+tool-judge posture --mode allow-silent                    # permit quietly
+tool-judge posture --mode allow-alert                     # permit, but tell me
+tool-judge posture --mode ask-first                       # queue and wait
+tool-judge posture --mode allow-silent=git-push:allow-alert   # per-rail
+```
+
+`allow-alert` is the interesting one: it is how you get the benefit of autonomy
+without giving up the ability to notice when the autonomy is wrong. You are not
+approving each command — you are subscribing to the ones you did not see.
+
+Two rules hold under every posture:
+
+- **no posture overrides a deny.** The floor stays a floor.
+- **no posture widens an undeclared command.** `allow-alert` on something
+  nobody declared would be unbounded autonomy that still *looks* supervised —
+  the alerts exist, so it feels watched, while nothing was ever declared.
+
+### The kill switch
+
+```bash
+tool-judge cut-off --reason "probing after refusals"
+#   CUT OFF at casey. Every command is refused until reset.
+$ tool-judge check git status          # rails say ALLOW
+CUT OFF: agent cut off at 2026-10-17 09:02:44 — probing after refusals (by casey)
+```
+
+It is **local** (it cannot depend on the network that raised the alarm), **durable**
+(a restart must not disarm it), **instant**, **total** (it overrides an allow),
+and **logged**. It lives in its own file, not the grants database, so an agent
+with database write access cannot reach it. An unreadable state file reads as
+**tripped**, because failing open here disarms the alarm with a corrupt file.
+Each of those five properties has a test that fails if it is removed.
+
+### Remote channels are graded, and widening is never one of them
+
+A Telegram chat that can grant permissions to a local shell is a *weaker*
+boundary than a human at a keyboard — it works from a phone, its audit trail
+lives on someone else's server, and if agent context includes anything from the
+channel, an injected instruction can arrive as a "message". So remote input is
+graded by what it can do:
+
+| action | remote? | why |
+|---|---|---|
+| `notify` | yes | alerts and status; reading is cheap and safe |
+| `act_pending` | yes | approve a request id that **already exists**; cannot invent permissions |
+| `cut_off` | yes | stopping an agent should be the *fastest* thing you can do |
+| `widen`, `grant_new`, `reset_kill_switch`, `edit_rails` | **never** | slowing these down is the entire point |
+
+The asymmetry is deliberate. A Telegram or Cloudflare adapter is a transport
+concern and should not re-derive this policy — `remote_check()` exists so the
+answer lives in one place, reachable from whatever gets bolted on next.
+
+---
+
 ## Bugs this repo found in itself
 
 Every one of these was a *thing that looked wired and was not*, which is the
@@ -351,6 +410,9 @@ which is either reassuring or humbling.
 | harness registry keyed by `"Verdict.ALLOW"` but looked up by `"allow"` | **every compile was a no-op** that reported "nothing to add, up to date" about a file it had never written to |
 | probe signal gated on the *current* verdict | missed the case that matters — a refused command retried differently **and allowed** |
 | probe severity keyed on `Severity.values()` | `Severity` is a str Enum; ranking crashed |
+| duplicate `-n` flag in argparse | raised at import, so **every** subcommand died — while 137 tests stayed green, because none built the parser |
+| kill switch not gating `check` | a cut-off agent asking "may I run this?" was still told **allow** |
+| `enforce()` duck-typed `grants.verdict` off a `GrantSet` | attribute does not exist, so every command looked unlisted and every posture degraded to `ask` |
 
 The first one is the instructive one. Nothing raised. Every git command simply
 asked for permission, always, forever — which looks exactly like a cautious
