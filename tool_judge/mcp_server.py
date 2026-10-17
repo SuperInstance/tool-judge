@@ -55,6 +55,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from . import advisory
 from .grants import GrantStore
 from .scope import Scope, applicable_scopes
 from .spec import SpecError, load
@@ -223,10 +224,22 @@ class Server:
                 requester="agent")
         except (KeyError, ValueError) as exc:
             return {"error": str(exc)}
+        # Flag it BEFORE a human spends attention on it. The advisory never
+        # refuses -- it annotates, and the person decides -- but "scope looks
+        # too wide for this reason" is worth knowing before you click.
+        flags = []
+        try:
+            flags = advisory.review(args["pattern"], args["scope"],
+                                    args.get("justification", ""),
+                                    rails=self._spec())
+        except Exception:                                     # noqa: BLE001
+            pass
+
         return {
             "request_id": rid,
             "status": "pending",
             "granted": False,
+            "advisory": [str(f) for f in flags],
             "note": ("Queued for a human. It is NOT granted until they approve. "
                      "Carry on with something else rather than polling."),
         }

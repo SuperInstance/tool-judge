@@ -35,60 +35,24 @@ from .spec import Spec
 
 # -- targets ---------------------------------------------------------------
 
-MCODE_PERMISSION = Path.home() / ".minimax" / "permission.json"
-CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
+# One compiler, not two.
+#
+# An earlier version of this file carried its own TARGETS table. That was a
+# second implementation of "where does this harness keep its permissions",
+# and two implementations of one fact is how they drift -- the same class of
+# bug this repo exists to catch. harness.py is now the only place that knows
+# a permission file's shape, and it also carries the refusal rule: an adapter
+# nobody has verified on this machine does not write.
+from .harness import UnverifiedAdapter, get as _adapter, known as _known, \
+    verified as _verified
 
-TARGETS = {
-    "mcode": {
-        "path": MCODE_PERMISSION,
-        "list_key": {"Verdict.ALLOW": "allow", "Verdict.ASK": "ask",
-                     "Verdict.DENY": "deny"},
-        "rule": lambda p: {"tool_name": "bash",
-                           "matcher": {"kind": "command", "pattern": p}},
-    },
-    "claude": {
-        "path": CLAUDE_SETTINGS,
-        "list_key": {"Verdict.ALLOW": "allow", "Verdict.ASK": "ask",
-                     "Verdict.DENY": "deny"},
-        "rule": lambda p: {"tool_name": "Bash", "pattern": p},
-    },
-}
-
-
-def _read(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text())
-    except json.JSONDecodeError:
-        # Do not overwrite a file we could not parse. A corrupt permission
-        # store is a problem to report, not to paper over by rewriting it.
-        raise SystemExit(
-            f"refusing to write: {path} exists but is not valid JSON.\n"
-            f"Move it aside and re-run; nothing has been changed."
-        )
+TARGETS = {n: {"path": _adapter(n).path, "verified": _adapter(n).verified}
+           for n in _known()}
 
 
 def plan(spec: Spec, target: str = "mcode") -> dict[str, list]:
     """What WOULD change. Pure -- no filesystem writes."""
-    tgt = TARGETS[target]
-    existing = _read(tgt["path"])
-    key_for = tgt["list_key"]
-    make = tgt["rule"]
-
-    out: dict[str, list] = {"allow": [], "ask": [], "deny": []}
-    have = {json.dumps(r, sort_keys=True)
-            for lst in existing.values() if isinstance(lst, list)
-            for r in lst}
-
-    for rail in spec.rails:
-        bucket = out[key_for[f"Verdict.{rail.kind.name}"]]
-        for pat in rail.patterns:
-            rule = make(pat.raw)
-            k = json.dumps(rule, sort_keys=True)
-            if k not in have:
-                bucket.append(rule)
-    return out
+    return _adapter(target).plan(spec.rails)
 
 
 def diff(spec: Spec, target: str = "mcode") -> str:
@@ -107,39 +71,12 @@ def diff(spec: Spec, target: str = "mcode") -> str:
     return "\n".join(lines)
 
 
-def apply(spec: Spec, target: str = "mcode", *, backup: bool = True) -> str:
-    tgt = TARGETS[target]
-    path: Path = tgt["path"]
-    p = plan(spec, target)
-
-    added = sum(len(v) for v in p.values())
-    if not added:
-        return f"nothing to add; {path} is up to date"
-
-    doc = _read(path)
-    doc.setdefault("version", 2)
-    for bucket in ("allow", "ask", "deny"):
-        doc.setdefault(bucket, [])
-        have = {json.dumps(r, sort_keys=True) for r in doc[bucket]}
-        for rule in p[bucket]:
-            k = json.dumps(rule, sort_keys=True)
-            if k not in have:
-                have.add(k)
-                doc[bucket].append(rule)
-
-    if backup and path.exists():
-        bdir = path.parent / f"{path.stem}-backups"
-        bdir.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        bak = bdir / f"{path.stem}-{stamp}{path.suffix}"
-        shutil.copy2(path, bak)
-        print(f"backup -> {bak}")
-
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(doc, indent=2) + "\n")
-    tmp.replace(path)
-    return (f"added {len(p['allow'])} allow, {len(p['ask'])} ask, "
-            f"{len(p['deny'])} deny -> {path}")
+def apply(spec: Spec, target: str = "mcode", *, backup: bool = True,
+          force: bool = False) -> str:
+    res = _adapter(target).apply(spec.rails, backup=backup, force=force)
+    if not res.verified and res.problems:
+        return res.summary() + "\n  " + "\n  ".join(res.problems)
+    return res.summary()
 
 
 def uninstall(spec: Spec, target: str = "mcode") -> str:
@@ -182,5 +119,3 @@ def uninstall(spec: Spec, target: str = "mcode") -> str:
     return f"removed {removed} rule(s) from {path}"
 
 
-def rails_of(spec: Spec, verdict: Verdict) -> list[Rail]:
-    return [r for r in spec.rails if r.kind is verdict]

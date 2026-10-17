@@ -211,6 +211,66 @@ a real sandbox limits what a *compromised* agent can do; this limits what a
 
 ---
 
+## The last mile: harness adapters
+
+Knowing *what* a project permits is not the same as knowing *where* a
+harness reads it. They disagree:
+
+| harness | file | shape | status |
+|---|---|---|---|
+| `mcode` | `~/.minimax/permission.json` | `{allow,deny,ask}[]` of `{tool_name, matcher}` | **verified here** |
+| `claude-code` | `~/.claude/settings.json` | `permissions.{allow,deny,ask}[]` of `{tool, pattern}` | documented; **refuses** |
+| crush / opencode / zcode / aider | — | — | unknown; **not implemented** |
+
+**An adapter nobody has verified on this machine does not write.** Not
+"writes and hopes" — refuses, and says what is missing. `claude-code` is
+documented but its `permissions` block is absent from this box's
+`settings.json`, so it refuses. A tool whose whole job is to be obeyed must be
+the most honest component in the stack, and an adapter that confidently writes
+a file the harness ignores is the loudest possible way to be useless.
+
+After writing, the adapter **reads the file back** and confirms every rule
+landed. Writing without verifying is the defect, not the fix.
+
+```bash
+tool-judge compile --target mcode            # dry run
+tool-judge compile --target claude-code     # refuses, and explains why
+```
+
+## Should this request even be made?
+
+A broker that accepts any well-formed request is a rubber stamp. Before a
+human spends attention on a pending request, `advisory.py` annotates it:
+
+```
+$ tool-judge request_grant 'rm:*' user --reason cleanup
+  [refuse-recommendation] scope looks too wide for this justification:
+    user scope lasts forever and applies everywhere, but the reason given is
+    7 characters. A task or project scope would cover this and could be
+    withdrawn.
+  [refuse-recommendation] pattern matches everything: 'rm:*' permits the
+    program unconditionally. Name the operations that are actually needed.
+```
+
+**It never blocks.** The moment it starts refusing it becomes a policy engine
+with opinions, and policy engines with opinions get bypassed. It annotates;
+the human decides.
+
+## A log a human can read
+
+Every layer here produces a number or a flag, and neither survives contact with
+the question "what was it thinking?". So each decision appends a sentence:
+
+```
+2026-10-17 09:15:03  DENY   user:casey      sudo:*
+    refused by the project's rails, which are a floor no grant overrides
+```
+
+Plain JSONL — the first thing anyone does with a log is `grep` it, and
+`sqlite3` is a worse `grep` than `grep`. `tool-judge log -n 20`.
+
+---
+
 ## Bugs this repo found in itself
 
 Every one of these was a *thing that looked wired and was not*, which is the
@@ -223,6 +283,7 @@ which is either reassuring or humbling.
 | judge pointed at Ollama's `/api/generate` | decision server 404s → every call degraded to `fits @ 0.00` |
 | `Scope(r["scope"])` | enum looked up by *value* not *name* — every stored grant failed to load |
 | allow/ask precedence in the CLI | a scoped `allow` was overridden by the rails' unlisted-default, so granting anything not already in the rails file was impossible |
+| harness registry keyed by `"Verdict.ALLOW"` but looked up by `"allow"` | **every compile was a no-op** that reported "nothing to add, up to date" about a file it had never written to |
 
 The first one is the instructive one. Nothing raised. Every git command simply
 asked for permission, always, forever — which looks exactly like a cautious

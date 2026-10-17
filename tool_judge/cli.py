@@ -23,6 +23,7 @@ import shlex
 import sys
 from pathlib import Path
 
+from .decisionlog import DecisionLog, REASONS
 from .compile import TARGETS, apply as compile_apply, diff as compile_diff
 from .grants import GrantStore
 from .scope import Scope, applicable_scopes
@@ -161,10 +162,22 @@ def cmd_decide(args) -> int:
         print(f"{exc}", file=sys.stderr)
         store.close()
         return 1
+    log = DecisionLog(Path(args.store).with_suffix(".decisions.log"))
+    log.record(out["status"], scope=f"{out['scope']}:", pattern=out["pattern"],
+               reason=f"{out['status']} by {out['decided_by']}",
+               decided_by=out["decided_by"], requester="human")
     print(f"request #{out['id']} {out['status']} by {out['decided_by']}"
           + (f"  -> granted {out['pattern']} at {out['scope']}"
              if out["status"] == "approved" else ""))
     store.close()
+    return 0
+
+
+def cmd_log(args) -> int:
+    log = DecisionLog(Path(args.store).with_suffix(".decisions.log"))
+    print(log.summary() + "\n")
+    for e in log.last(args.n):
+        print(e.render())
     return 0
 
 
@@ -236,6 +249,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     l = sub.add_parser("list"); l.set_defaults(fn=cmd_list)
 
+    lg = sub.add_parser("log"); lg.set_defaults(fn=cmd_log)
+
     pg = sub.add_parser("pending"); pg.set_defaults(fn=cmd_pending)
 
     dc = sub.add_parser("decide"); dc.add_argument("id", type=int)
@@ -249,6 +264,7 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--label")
     d.set_defaults(fn=cmd_device)
 
+    lg.add_argument("-n", type=int, default=20)
     pr = sub.add_parser("profile"); pr.add_argument("profile_action",
                                                    choices=["list", "import"])
     pr.add_argument("name", nargs="?")
