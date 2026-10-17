@@ -336,6 +336,60 @@ an ordinary ten-command session must raise nothing at all.
 
 ---
 
+## The console
+
+```bash
+tool-judge tui
+```
+
+This is the primary surface, and it is a line-oriented program rather than a
+curses one for three reasons that turned out to matter more than they sound:
+
+- **tmux is how these agents run.** A line-oriented program survives copy,
+  paste, scrollback, resize and a dropped SSH session. A full-screen TUI turns
+  all four into a corrupted display.
+- **it is testable.** `run()` takes its input and output as callables, so the
+  whole conversation is exercised on every suite run — no pty, no terminal, no
+  flakes. That is why this is 100% covered rather than "tested by hand once".
+- **it pipes.** `printf 'ask ls\nquit\n' | tool-judge tui` is a legitimate
+  use, which makes the interface a scriptable one too.
+
+```
+> ask git status
+  ALLOW  git status
+    from  grants: unlisted
+    from  rails : allow (git-inspection)
+
+> posture allow-alert=git-push:ask-first
+  posture -> allow-alert (git-push=ask-first)
+
+> cut-off that rm sequence was odd
+  CUT OFF. every command is refused. reason: that rm sequence was odd
+
+> ask git status
+  CUT OFF: agent cut off at 09:20:41 — that rm sequence was odd (by console)
+```
+
+### Answering in words
+
+```
+> say 3 yes but only for this task
+> say 3 never
+> say 3 always in this project
+```
+
+The parser is **deterministic and narrow**, on purpose. It reads polarity and
+scope, and when it finds neither it says *"I could not read a decision in
+that"* and shows three phrasings it can read. It never guesses. A wrong read
+here grants a permission you did not mean to grant, which is the single failure
+this entire tool exists to prevent.
+
+Two subtleties it gets right, both caught by tests: **most specific scope
+wins** (`always in this project` is *project*, not user), and **negation beats
+implied assent** (`never do this in this project` is a refusal).
+
+---
+
 ## Postures, and the switch that must not fail
 
 Tell it in words how you want the agent to behave:

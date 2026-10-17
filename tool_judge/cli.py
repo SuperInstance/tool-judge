@@ -215,6 +215,12 @@ def cmd_cutoff(args) -> int:
     return 0
 
 
+def cmd_tui(args) -> int:
+    from .tui import run as run_tui
+    store = GrantStore(args.store)
+    return run_tui(store, args.rails)
+
+
 def cmd_log(args) -> int:
     log = DecisionLog(Path(args.store).with_suffix(".decisions.log"))
     print(log.summary() + "\n")
@@ -293,6 +299,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     lg = sub.add_parser("log"); lg.add_argument("-n", type=int, default=20)
     lg.set_defaults(fn=cmd_log)
+
+    tu = sub.add_parser("tui", help="the console: ask, approve, cut off")
+    tu.set_defaults(fn=cmd_tui)
 
     po = sub.add_parser("posture"); po.add_argument("--mode")
     po.set_defaults(fn=cmd_posture)
