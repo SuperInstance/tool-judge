@@ -152,6 +152,65 @@ Read [LIMITS.md](LIMITS.md). The short version:
 
 ---
 
+## As an MCP server
+
+A permission layer bound to one harness is a permission layer most agents
+never use. Every harness — Aider, Claude Code, zcode, mcode — already speaks
+MCP, so the constraint follows the agent instead of being rewritten per agent.
+
+```bash
+tool-judge-mcp --store ~/.local/share/tool-judge/grants.db --rails ./.tool-judge.yaml
+```
+
+### The line this exists to draw
+
+```
+        agent may REQUEST.      human may GRANT.
+```
+
+There is **no tool on the agent-facing surface that writes a grant.**
+`request_grant` appends to a queue and returns an id. Nothing on the server
+promotes that row except `decide()`, which the CLI exposes and the MCP server
+does not. `tests/test_broker.py` enumerates the actual tool table and fails if
+a granting tool ever appears in it.
+
+Get this wrong and the whole layer is theatre: an agent that can widen its own
+permissions will.
+
+### Spawn an agent that earns its permissions
+
+```bash
+# the agent runs under task: grants only
+tool-judge request_grant  task:boot      'kubectl:*'  --reason "inspect staging"
+
+# you decide, out of band
+tool-judge pending
+#   #1  pending  task:boot  kubectl:*  inspect staging
+tool-judge decide 1 --by casey
+#   request #1 approved by casey -> granted kubectl:* at task
+```
+
+After approval the agent can run it — **in that task only**. A different task
+asks again. That is the whole supervisor loop:
+
+```
+bootstrap   task: grants only
+proven      asks for session: or project:, with a reason
+you decide  approve or refuse
+repeat      it widens as it demonstrably needs to
+```
+
+A granted permission cannot buy its way past a rail: the agent can request
+`sudo:*`, you can approve it, and the rail still wins. Deny is a floor.
+
+This is a **pseudo-sandbox**: cheap, no container, no namespace, no duplicated
+toolchain. It is also weaker than a real one, and the difference is precise —
+a real sandbox limits what a *compromised* agent can do; this limits what a
+*cooperating* agent asks for. Do not use it as your only defence. See
+[LIMITS.md](LIMITS.md).
+
+---
+
 ## Bugs this repo found in itself
 
 Every one of these was a *thing that looked wired and was not*, which is the
@@ -190,7 +249,7 @@ examples/      probe_decisions_api.py — pins the decision-server schema.
 ## Tests
 
 ```bash
-pytest -q          # 61 tests, no network, no model
+pytest -q          # 75 tests, no network, no model
 ```
 
 The rails tests are a table of commands and the verdict each **must** get.

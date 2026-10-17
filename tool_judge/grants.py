@@ -56,6 +56,23 @@ CREATE TABLE IF NOT EXISTS devices (
     created_at REAL NOT NULL
 );
 
+-- Pending requests exist because the agent must NOT be able to grant itself.
+-- If an agent can call grant(), the entire permission layer is theatre: it
+-- simply approves whatever it wants next. So the MCP exposes request, and a
+-- HUMAN clears the queue. Nothing else writes to grants.
+CREATE TABLE IF NOT EXISTS pending (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope       TEXT NOT NULL,
+    key         TEXT NOT NULL,
+    pattern     TEXT NOT NULL,
+    verdict     TEXT NOT NULL,
+    justification TEXT NOT NULL DEFAULT '',
+    requester   TEXT NOT NULL DEFAULT 'agent',
+    status      TEXT NOT NULL DEFAULT 'pending',
+    decided_by  TEXT NOT NULL DEFAULT '',
+    created_at  REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -218,6 +235,62 @@ class GrantStore:
             return None
         return self.register_device("this", kind, label=model or kind,
                                     facts={"model": model})
+
+    # -- pending requests --------------------------------------------------
+
+    # THE WHOLE POINT OF THIS TABLE. An agent that can call grant() will call
+    # grant() on whatever it wants next, and the permission layer becomes
+    # theatre. So the agent-facing path can only ever create a pending row; a
+    # human clears it. Keeping request and approval in different places, with
+    # different writers, is the property that makes the rest worth having.
+
+    def request(self, scope: Scope | str, key: str, pattern: str,
+                verdict: str = "allow", *, justification: str = "",
+                requester: str = "agent") -> int:
+        s = Scope.parse(scope) if isinstance(scope, str) else scope
+        if verdict not in ("allow", "ask", "deny"):
+            raise ValueError(f"verdict must be allow|ask|deny, got {verdict!r}")
+        cur = self._conn.execute(
+            "INSERT INTO pending (scope,key,pattern,verdict,justification,"
+            "requester,status,created_at) VALUES (?,?,?,?,?,?,'pending',?)",
+            (s.label, key, pattern, verdict, justification, requester,
+             time.time()))
+        self._conn.commit()
+        return int(cur.lastrowid)
+
+    def pending(self, status: str = "pending") -> list[dict]:
+        return [dict(r) for r in self._conn.execute(
+            "SELECT * FROM pending WHERE status=? ORDER BY created_at",
+            (status,))]
+
+    def decide(self, request_id: int, approve: bool, *, by: str = "human") -> dict:
+        """
+        Approve or refuse a pending request. THE ONLY PATH FROM REQUEST TO GRANT.
+
+        `by` is recorded, so a later reader can tell who widened the scope --
+        which is the difference between an agent bootstrapping under
+        supervision and an agent that quietly did.
+        """
+        row = self._conn.execute("SELECT * FROM pending WHERE id=?",
+                                 (request_id,)).fetchone()
+        if not row:
+            raise KeyError(f"no pending request {request_id}")
+        if row["status"] != "pending":
+            raise ValueError(f"request {request_id} already {row['status']}")
+
+        status = "approved" if approve else "refused"
+        self._conn.execute(
+            "UPDATE pending SET status=?, decided_by=? WHERE id=?",
+            (status, by, request_id))
+        self._conn.commit()
+
+        if approve:
+            self.grant(Scope.parse(row["scope"]), row["key"], row["pattern"],
+                       row["verdict"],
+                       reason=row["justification"] or f"approved by {by}",
+                       granted_by=by)
+        return {"id": request_id, "status": status, "decided_by": by,
+                "pattern": row["pattern"], "scope": row["scope"]}
 
     # -- meta -------------------------------------------------------------
 

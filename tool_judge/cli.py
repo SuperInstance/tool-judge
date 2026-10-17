@@ -140,6 +140,34 @@ def cmd_list(args) -> int:
     return 0
 
 
+def cmd_pending(args) -> int:
+    """The human's queue. This is where an agent's request becomes a grant."""
+    store = GrantStore(args.store)
+    rows = store.pending()
+    if not rows:
+        print("(nothing pending)")
+    for r in rows:
+        print(f"  #{r['id']:<4} {r['status']:<9} {r['scope']}:{r['key']:<14} "
+              f"{r['pattern']:<28} {r['justification'][:48]}")
+    store.close()
+    return 0
+
+
+def cmd_decide(args) -> int:
+    store = GrantStore(args.store)
+    try:
+        out = store.decide(args.id, not args.refuse, by=args.by)
+    except (KeyError, ValueError) as exc:
+        print(f"{exc}", file=sys.stderr)
+        store.close()
+        return 1
+    print(f"request #{out['id']} {out['status']} by {out['decided_by']}"
+          + (f"  -> granted {out['pattern']} at {out['scope']}"
+             if out["status"] == "approved" else ""))
+    store.close()
+    return 0
+
+
 def cmd_device(args) -> int:
     store = GrantStore(args.store)
     if args.device_action == "add":
@@ -207,6 +235,13 @@ def build_parser() -> argparse.ArgumentParser:
     r.set_defaults(fn=cmd_revoke)
 
     l = sub.add_parser("list"); l.set_defaults(fn=cmd_list)
+
+    pg = sub.add_parser("pending"); pg.set_defaults(fn=cmd_pending)
+
+    dc = sub.add_parser("decide"); dc.add_argument("id", type=int)
+    dc.add_argument("--refuse", action="store_true")
+    dc.add_argument("--by", default="human")
+    dc.set_defaults(fn=cmd_decide)
 
     d = sub.add_parser("device"); d.add_argument("device_action",
                                                  choices=["add", "list", "detect"])
