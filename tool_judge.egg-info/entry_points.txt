@@ -1,3 +1,0 @@
-[console_scripts]
-tool-judge = tool_judge.cli:main
-tool-judge-mcp = tool_judge.mcp_server:main
