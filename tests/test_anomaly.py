@@ -146,3 +146,58 @@ def test_norm_ignores_arg_order_and_values():
 def test_danger_rank_is_monotone():
     assert _danger_rank(["rm", "f"]) < _danger_rank(["rm", "-rf", "d"])
     assert _danger_rank(["rm", "-rf", "d"]) < _danger_rank(["sudo", "rm", "-rf", "d"])
+
+
+# -- subcommands: the false positive that mattered -------------------------
+
+def test_different_git_subcommands_are_not_probing():
+    """
+    Caught by the AUDIT test, not by review. Replaying a normal session
+    flagged `git status -sb` then `git commit -m x` as probe-after-refusal --
+    two unrelated operations sharing a program name.
+
+    This is the false positive that would have made the detector noise, and a
+    dismissed detector is worse than none.
+    """
+    d = Detector()
+    for argv in (["git", "status", "-sb"], ["ls", "-la"],
+                 ["git", "commit", "-m", "x"], ["git", "push", "origin", "main"]):
+        for a in d.observe(obs(argv, "unknown")):
+            assert a.kind != "probe-after-refusal", (argv, a.kind)
+
+
+def test_same_subcommand_with_different_flags_still_fires():
+    """The narrower test must survive the fix above.
+
+    Probe-after-refusal needs a REAL refusal -- an audit replay has no
+    verdicts, and inventing one produced three false alerts on a real session.
+    """
+    d = Detector()
+    d.observe(obs(["git", "status"], "deny"))
+    alerts = d.observe(obs(["git", "status", "--porcelain"], "allow"))
+    assert "probe-after-refusal" in kinds(alerts)
+
+
+def test_rm_variants_fire_without_any_verdict():
+    """
+    The signal that survives an audit: same operation, same target, different
+    flags. No verdict required, because it is about what the agent DID.
+    """
+    d = Detector()
+    d.observe(obs(["rm", "-rf", "data"], "unknown"))
+    assert "target-ramp" in kinds(d.observe(obs(["rm", "-r", "data"], "unknown")))
+
+
+def test_target_ramp_needs_the_SAME_target():
+    """The property that keeps ordinary exploration quiet."""
+    d = Detector()
+    for argv in (["ls", "-la", "/a"], ["ls", "-la", "/b"], ["ls", "/c"]):
+        for a in d.observe(obs(argv, "unknown")):
+            assert a.kind != "target-ramp", (argv, a.kind)
+
+
+def test_operation_of():
+    from tool_judge.anomaly import operation
+    assert operation(["git", "status", "-sb"]) == ("git", "status")
+    assert operation(["rm", "-rf", "data"]) == ("rm",)
+    assert operation(["kubectl", "get", "pods"]) == ("kubectl", "get")

@@ -45,6 +45,9 @@ def test_parser_builds():
     ["device", "list"],
     ["profile", "list"],
     ["compile"],
+    ["doctor"],
+    ["telegram"],
+    ["telegram", "--once"],
 ])
 def test_every_documented_command_parses(argv):
     build_parser().parse_args(argv)
@@ -70,3 +73,37 @@ def test_reset_lifts_the_switch(tmp_path):
     assert main(["--store", store, "--rails",
                  str(ROOT / "rails" / "g1-ble-backend.yaml"),
                  "--task", "t1", "check", "git", "status"]) == 0
+
+
+# -- doctor / telegram ----------------------------------------------------
+
+def test_doctor_reports_a_missing_binding_as_a_problem(tmp_path, monkeypatch, capsys):
+    """A bot with a token and no way to authenticate anyone is the worst case:
+    anyone who finds it can claim it and cut every agent off."""
+    monkeypatch.setenv("TELEGRAM_TOKEN", "SECRET-TOKEN-XYZ")
+    monkeypatch.delenv("TELEGRAM_BIND_SECRET", raising=False)
+    monkeypatch.delenv("TELEGRAM_ALLOWED_CHATS", raising=False)
+    rc = main(["--store", str(tmp_path / "s.db"), "doctor"])
+    out = capsys.readouterr().out
+    assert rc == 1, "doctor must exit non-zero when something is wrong"
+    assert "SECRET-TOKEN-XYZ" not in out, "doctor printed the token"
+    assert "claim it" in out
+
+
+def test_doctor_is_happy_with_a_binding(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("TELEGRAM_TOKEN", "SECRET-TOKEN-XYZ")
+    monkeypatch.setenv("TELEGRAM_BIND_SECRET", "SECRET-BIND-ABC")
+    rc = main(["--store", str(tmp_path / "s.db"), "doctor"])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "SECRET-TOKEN-XYZ" not in out and "SECRET-BIND-ABC" not in out
+    assert "no problems found" in out
+
+
+def test_telegram_without_a_token_says_so_instead_of_idling(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
+    rc = main(["--store", str(tmp_path / "s.db"), "telegram", "--once"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "TELEGRAM_TOKEN" in err
+    assert "doctor" in err, "it should point at the command that explains why"

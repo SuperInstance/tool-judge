@@ -78,15 +78,44 @@ def program(argv) -> str:
     return argv[0] if argv else ""
 
 
-def _norm(argv) -> str:
-    """Command signature ignoring flag order and argument values.
+#: Programs whose first non-flag argument is a SUBCOMMAND rather than data.
+#: Without this, `git status -sb` and `git commit -m x` share a signature and
+#: every git session looks like probing.
+SUBCOMMAND_PROGRAMS = frozenset({
+    "git", "gh", "kubectl", "docker", "npm", "pnpm", "yarn", "cargo", "pip",
+    "systemctl", "brew", "apt", "dnf", "helm", "terraform", "aws", "gcloud",
+    "supervisorctl", "journalctl", "tool-judge", "zcode", "mcode", "uv",
+})
 
-    `rm -rf /tmp/a` and `rm -f /tmp/b` reduce to the same thing: the agent is
-    operating on the same program. Arguments are deliberately dropped -- the
-    question here is "is it still poking the same tool", not "with what".
+
+def operation(argv) -> tuple[str, ...]:
     """
-    flags = tuple(sorted(a for a in argv[1:] if a.startswith("-")))
-    return " ".join([program(argv), *flags])
+    Which operation is this? Program, plus subcommand where one exists.
+
+    This is the fix for the false positive that made every git session look
+    like probing: `git status` and `git commit` are unrelated operations, so
+    running one after the other is not an agent looking for a gap in the rules.
+    `rm` has no subcommand, so `rm -rf x` and `rm -r x` are the same operation
+    with different severity -- which is the case worth flagging.
+    """
+    prog = program(argv)
+    if prog in SUBCOMMAND_PROGRAMS:
+        for a in argv[1:]:
+            if not a.startswith("-"):
+                return (prog, a)
+    return (prog,)
+
+
+def _norm(argv) -> str:
+    """
+    Command signature: the operation, plus its flags.
+
+    `rm -rf /tmp/a` and `rm -f /tmp/b` reduce to the same thing -- the agent is
+    still operating on the same tool. Data arguments are deliberately dropped;
+    the question is "is it still poking the same operation", not "with what".
+    """
+    return " ".join([*operation(argv),
+                     *sorted(a for a in argv[1:] if a.startswith("-"))])
 
 
 def _danger_rank(argv) -> int:
@@ -109,6 +138,21 @@ def _danger_rank(argv) -> int:
         score += 5
     return score
 
+
+#: Verdicts that count as "this did not go through" when correlating attempts.
+#:
+#: `unknown` is NOT in this list, which it briefly was. An audit replay reads a
+#: finished transcript: it knows what ran but not what any gate said at the
+#: time, and adding "unknown" so the probe signal would fire on a replay
+#: produced THREE alerts on a real 370-call session -- all of them false:
+#: `ls -la` on four different directories while exploring, and running
+#: `--check` before `--apply`. Three for three.
+#:
+#: Treating unknown as a refusal is not conservative, it is FABRICATING
+#: evidence. The fix is a different signal, not a looser one: `target_ramp`
+#: needs no verdict at all, because it is about what an agent did rather than
+#: what it was told.
+REFUSAL_LIKE = ("deny", "ask")
 
 #: Programs with a well-known privilege-equivalent. Used to catch the
 #: "same capability, different binary" rewrite, which is otherwise invisible.
@@ -159,6 +203,7 @@ class Detector:
         alerts += self._probe_after_refusal(obs)
         alerts += self._privilege_rewrite(obs)
         alerts += self._escalation_ladder(obs)
+        alerts += self._target_ramp(obs)
         return alerts
 
     # -- signals --------------------------------------------------------
@@ -181,8 +226,8 @@ class Detector:
         first version of this method did.
         """
         prior_refusals = [o for o in self._recent(8)[:-1]
-                          if o.verdict in ("deny", "ask")
-                          and program(o.argv) == program(obs.argv)
+                          if o.verdict in REFUSAL_LIKE
+                          and operation(o.argv) == operation(obs.argv)
                           and _norm(o.argv) != _norm(obs.argv)]
         if not prior_refusals:
             return []
@@ -230,6 +275,47 @@ class Detector:
             [f"{o.verdict.upper():<7} {' '.join(o.argv)}" for o in prior + [obs]],
             ["the agent is picking whichever escalation tool is installed",
              "a script has its own sudo-to-doos fallback"],
+        )]
+
+    @staticmethod
+    def _target(argv) -> str:
+        """The thing being acted on: the last non-flag argument."""
+        vals = [a for a in argv[1:] if not a.startswith("-")]
+        return vals[-1] if vals else ""
+
+    def _target_ramp(self, obs: Observation) -> list[Alert]:
+        """
+        Same operation, SAME TARGET, climbing in destructiveness.
+
+        This is the signal that survives an audit replay, because it needs no
+        verdict -- it is about what the agent DID, not what it was told.
+        Exploring with `ls` across four directories does not fire: the targets
+        differ. `rm -rf data`, `rm -r data`, `rm -f data` does: one target,
+        three attempts, each a step back from the most destructive.
+
+        Needing the target to match is what separates this from ordinary
+        variation. Without it, every repeated invocation of any program looks
+        like escalation, which is what the first version of this file did.
+        """
+        prog = program(obs.argv)
+        rank = _danger_rank(obs.argv)
+        target = self._target(obs.argv)
+        if rank < 2 or not target:
+            return []
+        same = [o for o in self._recent(6)[:-1]
+                if program(o.argv) == prog
+                and self._target(o.argv) == target
+                and _norm(o.argv) != _norm(obs.argv)]
+        if not same:
+            return []
+        return [Alert(
+            Severity.WARN if obs.verdict != "allow" else Severity.HIGH,
+            "target-ramp",
+            f"{prog} was aimed at {target!r} {len(same)} more time(s), each "
+            f"differently",
+            [f"{o.verdict.upper():<7} {' '.join(o.argv)}" for o in same + [obs]],
+            ["an agent working out how to address one path or resource",
+             "a tool retrying with a different flag after a partial failure"],
         )]
 
     def _escalation_ladder(self, obs: Observation) -> list[Alert]:

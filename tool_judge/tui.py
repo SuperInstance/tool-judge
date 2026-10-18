@@ -70,6 +70,7 @@ tool-judge — permissions for your agents, from a terminal.
   list             what this agent may do, by scope
   pending          requests waiting on you
   say <request-id> <free text>   approve/deny, in words
+  audit             what the last agent session actually ran
   posture [mode]   how commands are treated
   cut-off [--reset]
   feed             recent behaviour signals
@@ -82,6 +83,7 @@ HELP = """
   list                 your grants, grouped by scope
   pending              queued requests
   say <id> <text>      answer a request in plain language
+  audit                read the newest mcode transcript and judge it
   posture [mode]       allow-silent | allow-alert | ask-first | cut-off
   cut-off [--reset]    stop the agent / let it run again
   feed                 recent behavioural signals
@@ -247,6 +249,19 @@ class Console:
             self.say(f"  (you said {scope_hint!r}; applied as {out['scope']}. "
                      f"re-scope with `grant` if you meant something narrower)")
 
+    def cmd_audit(self, line: str) -> None:
+        from .audit import audit as run_audit, newest_session
+        target = line.strip() or None
+        path = Path(target) if target else newest_session()
+        if path is None or not Path(path).exists():
+            self.say(f"  no transcript found{'' if not target else ': ' + target}")
+            return
+        try:
+            self.kill.check()
+        except CutOff:
+            pass          # an audit still works while an agent is stopped
+        self.say(run_audit(path).render())
+
     def cmd_posture(self, line: str) -> None:
         cur = self.store.get_meta("posture") or ""
         arg = line.strip()
@@ -313,7 +328,7 @@ class Console:
     DISPATCH = {
         "ask": "cmd_ask", "list": "cmd_list", "ls": "cmd_list",
         "pending": "cmd_pending", "say": "cmd_say",
-        "posture": "cmd_posture", "cut-off": "cmd_cut_off", "cutoff": "cmd_cut_off",
+        "posture": "cmd_posture", "audit": "cmd_audit", "cut-off": "cmd_cut_off", "cutoff": "cmd_cut_off",
         "feed": "cmd_feed", "log": "cmd_log", "why": "cmd_why",
         "help": "cmd_help", "?": "cmd_help", "quit": None, "exit": None,
     }

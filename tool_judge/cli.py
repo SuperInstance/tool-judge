@@ -215,6 +215,30 @@ def cmd_cutoff(args) -> int:
     return 0
 
 
+def cmd_audit(args) -> int:
+    """
+    Audit what an mcode session ACTUALLY ran, from its own transcript.
+
+    This is the authoritative log. Unlike an MCP check_command call, it is
+    written by the process that executes, so it cannot be skipped by an agent
+    that forgets to ask.
+    """
+    from .audit import audit as run_audit, newest_session
+    if args.session:
+        path = Path(args.session)
+    else:
+        path = newest_session()
+        if path is None:
+            print("no mcode session transcripts found", file=sys.stderr)
+            return 2
+    if not path.exists():
+        print(f"no such transcript: {path}", file=sys.stderr)
+        return 2
+    rep = run_audit(path)
+    print(rep.render())
+    return 1 if rep.alerts else 0
+
+
 def cmd_tui(args) -> int:
     from .tui import run as run_tui
     store = GrantStore(args.store)
@@ -272,6 +296,67 @@ def cmd_compile(args) -> int:
     return 0
 
 
+# -- config and the remote ------------------------------------------------
+
+def _cfg(args):
+    """Config for the remote half. The explicit flags win over the env."""
+    from .config import load as load_cfg
+    return load_cfg(store=Path(args.store), rails=Path(args.rails))
+
+
+def cmd_doctor(args) -> int:
+    """
+    Print the resolved configuration, and every way it is currently unsafe.
+
+    Never prints a secret -- `describe()` shows presence, not value. Exits
+    non-zero when there is something to fix, so this is usable from a deploy
+    script rather than only by a human reading it.
+    """
+    from .config import describe
+    cfg = _cfg(args)
+    print(describe(cfg))
+    problems = cfg.validate()
+    print()
+    if not problems:
+        print("no problems found.")
+        return 0
+    print(f"{len(problems)} problem(s):\n" + "\n".join(f"  - {p}" for p in problems))
+    return 1
+
+
+def cmd_telegram(args) -> int:
+    """
+    Run the remote control. Requires a token; without one, says so and exits
+    rather than idling -- a silent no-op here would look like a bot that is
+    ignoring you.
+    """
+    from .config import ConfigError
+    from .telegram import build
+    cfg = _cfg(args)
+    try:
+        cfg.require_ok()
+    except ConfigError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    store = GrantStore(args.store)
+    try:
+        tg = build(cfg, store)
+        if tg is None:
+            print("TELEGRAM_TOKEN is not set; there is nothing to run.\n"
+                  "`tool-judge doctor` shows what is configured.",
+                  file=sys.stderr)
+            return 2
+        if args.once:
+            tg.pump(once=True)
+            if tg.last_error:
+                print(f"telegram did not answer: {tg.last_error}", file=sys.stderr)
+                return 1
+            return 0
+        return tg.run()
+    finally:
+        store.close()
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="tool-judge", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -299,6 +384,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     lg = sub.add_parser("log"); lg.add_argument("-n", type=int, default=20)
     lg.set_defaults(fn=cmd_log)
+
+    au = sub.add_parser("audit",
+                        help="read an mcode session transcript and judge it")
+    au.add_argument("--session", help="path to messages.jsonl (default: newest)")
+    au.set_defaults(fn=cmd_audit)
 
     tu = sub.add_parser("tui", help="the console: ask, approve, cut off")
     tu.set_defaults(fn=cmd_tui)
@@ -332,6 +422,16 @@ def build_parser() -> argparse.ArgumentParser:
                                                      choices=sorted(TARGETS))
     cp.add_argument("--apply", action="store_true")
     cp.set_defaults(fn=cmd_compile)
+
+    dr = sub.add_parser("doctor",
+                        help="show the resolved config (no secrets) and what is wrong")
+    dr.set_defaults(fn=cmd_doctor)
+
+    tg = sub.add_parser("telegram",
+                        help="run the remote control: cut off, approve, deny")
+    tg.add_argument("--once", action="store_true",
+                    help="poll a single time and exit")
+    tg.set_defaults(fn=cmd_telegram)
     return p
 
 
